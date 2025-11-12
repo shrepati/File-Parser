@@ -453,7 +453,10 @@
 
         <!-- Results Section -->
         <div class="results-section" id="resultsSection">
-            <h2 style="margin-bottom: 20px; color: #333;">Extraction Complete</h2>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2 style="color: #333; margin: 0;">Extraction Complete</h2>
+                <button class="btn" onclick="resetApp()" style="background: #ff4757;">Clear & New Upload</button>
+            </div>
 
             <div class="summary-cards">
                 <div class="summary-card" id="filesCard">
@@ -475,7 +478,10 @@
                 <div class="listing-header">
                     <div class="listing-header-row">
                         <div class="listing-title">📄 Files</div>
-                        <button class="close-btn" onclick="closeListing()">Close</button>
+                        <div>
+                            <button class="close-btn" onclick="closeListing()" style="margin-right: 10px;">Back</button>
+                            <button class="close-btn" onclick="resetApp()">Clear All</button>
+                        </div>
                     </div>
                     <div class="breadcrumb" id="filesBreadcrumb"></div>
                 </div>
@@ -487,7 +493,10 @@
                 <div class="listing-header">
                     <div class="listing-header-row">
                         <div class="listing-title">📁 Directories</div>
-                        <button class="close-btn" onclick="closeListing()">Close</button>
+                        <div>
+                            <button class="close-btn" onclick="closeListing()" style="margin-right: 10px;">Back</button>
+                            <button class="close-btn" onclick="resetApp()">Clear All</button>
+                        </div>
                     </div>
                     <div class="breadcrumb" id="dirsBreadcrumb"></div>
                 </div>
@@ -727,6 +736,55 @@
             dirsListing.classList.remove('active');
             filesCard.classList.remove('active');
             dirsCard.classList.remove('active');
+            closeViewer();
+        }
+
+        function resetApp() {
+            // Reset all data
+            currentJobId = null;
+            extractedData = null;
+            currentPath = '';
+
+            // Hide all sections
+            progressSection.classList.remove('active');
+            resultsSection.classList.remove('active');
+            filesListing.classList.remove('active');
+            dirsListing.classList.remove('active');
+            fileViewer.classList.remove('active');
+
+            // Clear cards
+            filesCard.classList.remove('active');
+            dirsCard.classList.remove('active');
+
+            // Reset counts
+            document.getElementById('filesCount').textContent = '0';
+            document.getElementById('dirsCount').textContent = '0';
+            document.getElementById('totalSize').textContent = '0 B';
+
+            // Clear lists
+            document.getElementById('filesList').innerHTML = '';
+            document.getElementById('dirsList').innerHTML = '';
+
+            // Clear breadcrumbs
+            document.getElementById('filesBreadcrumb').innerHTML = '';
+            document.getElementById('dirsBreadcrumb').innerHTML = '';
+
+            // Clear file viewer
+            document.getElementById('fileContent').textContent = '';
+            document.getElementById('viewerTitle').textContent = 'File Content';
+
+            // Reset file input
+            fileInput.value = '';
+            selectedFile.style.display = 'none';
+            fileName.textContent = '';
+
+            // Reset progress
+            progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
+            statusMessage.textContent = 'Initializing...';
+
+            // Scroll to top
+            window.scrollTo({ top: 0, behavior: 'smooth' });
         }
 
         async function viewFile(filePath) {
