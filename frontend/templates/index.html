@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Extractor - AI-Powered Test Analysis</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📦 File Extractor</h1>
+            <p>Upload and extract archives with AI-powered test analysis</p>
+        </div>
+
+        <!-- Upload Section -->
+        <div class="upload-section" id="uploadSection">
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📁</div>
+                <div class="upload-text">Drag & Drop your archive file here</div>
+                <div class="upload-hint">or click to browse (ZIP, TAR, TAR.GZ, etc.)</div>
+                <input type="file" id="fileInput" accept=".zip,.tar,.gz,.bz2,.xz,.tgz,.tar.gz,.tar.bz2,.tar.xz">
+                <button class="btn" id="selectBtn">Select File</button>
+            </div>
+            <div id="selectedFile" style="display: none;">
+                <strong>Selected:</strong> <span id="fileName"></span>
+                <button class="btn" id="uploadBtn">Upload & Extract</button>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div class="progress-section" id="progressSection">
+            <h2>Processing...</h2>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar">0%</div>
+            </div>
+            <div class="status-message" id="statusMessage">Initializing...</div>
+        </div>
+
+        <!-- Results Section -->
+        <div class="results-section" id="resultsSection">
+            <div class="results-header">
+                <h2>Extraction Complete</h2>
+                <button class="btn btn-danger" onclick="resetApp()">Clear & New Upload</button>
+            </div>
+
+            <!-- Summary Cards -->
+            <div class="summary-cards">
+                <div class="summary-card">
+                    <div class="card-number" id="totalSize">0 B</div>
+                    <div class="card-label">Total Size</div>
+                </div>
+                <div class="summary-card" id="rhosoCard" onclick="showTab('results')" style="display: none;">
+                    <div class="card-number" id="rhosoCount">0</div>
+                    <div class="card-label">RHOSO Tests</div>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="tabs">
+                <button class="tab-btn active" onclick="showTab('tree')">File Browser</button>
+                <button class="tab-btn" id="fileViewerTabBtn" style="display: none;" onclick="showTab('viewer')">File Viewer</button>
+                <button class="tab-btn" id="resultsTabBtn" style="display: none;" onclick="showTab('results')">Test Results</button>
+                <button class="tab-btn" id="tableViewTabBtn" style="display: none;" onclick="showTab('tableview')">Test Details</button>
+            </div>
+
+            <!-- Tab Content -->
+            <div class="tab-content active" id="treeTab">
+                <div id="treeView"></div>
+            </div>
+
+            <div class="tab-content" id="viewerTab">
+                <div class="file-viewer-header">
+                    <div class="file-viewer-info">
+                        <span id="viewerFileName">No file selected</span>
+                        <span id="viewerFileSize" style="color: #666; margin-left: 15px;"></span>
+                    </div>
+                    <div class="file-viewer-actions">
+                        <button class="btn btn-sm" id="downloadFileBtn" style="display: none;" onclick="downloadCurrentFile()">Download</button>
+                        <button class="btn btn-sm" onclick="closeFileViewer()">Close</button>
+                    </div>
+                </div>
+                <div id="fileViewerContent" class="file-viewer-content">
+                    <div style="text-align: center; padding: 40px; color: #999;">
+                        Select a file from the File Browser to view its content
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="resultsTab">
+                <!-- AI Backend Selector -->
+                <div class="ai-backend-selector">
+                    <label for="aiBackend">AI Backend:</label>
+                    <select id="aiBackend" class="backend-select">
+                        <option value="gemini" selected>Google Gemini 2.0 Flash (Recommended)</option>
+                        <option value="claude">Anthropic Claude 3.5 Sonnet</option>
+                        <option value="mcp">MCP Server</option>
+                    </select>
+                    <button class="btn btn-sm" onclick="loadAvailableBackends()">🔄 Refresh</button>
+                </div>
+
+                <!-- RHOSO Folders List -->
+                <div id="rhosoFoldersList" class="rhoso-folders">
+                    <div class="loading">Discovering RHOSO test folders...</div>
+                </div>
+
+                <!-- Test Results Container (shown when folder is selected) -->
+                <div id="testResultsContainer" style="display: none;">
+                    <div class="results-header">
+                        <button class="btn btn-sm" onclick="backToFoldersList()">← Back to Folders</button>
+                        <h3 id="currentTestFolder"></h3>
+                    </div>
+
+                    <!-- Test Summary Cards -->
+                    <div class="test-summary-cards" id="testSummaryCards"></div>
+
+                    <!-- AI Analysis Section -->
+                    <div class="ai-analysis-section">
+                        <button class="btn btn-primary" id="analyzeBtn" onclick="startAIAnalysis()">
+                            ✨ Analyze with AI
+                        </button>
+                        <div id="aiAnalysisResult" class="ai-analysis-result" style="display: none;"></div>
+                    </div>
+
+                    <!-- Test Failures List -->
+                    <div class="failures-section">
+                        <h4>Test Failures</h4>
+                        <div id="failuresList" class="failures-list"></div>
+                    </div>
+
+                    <!-- Skipped Tests List -->
+                    <div class="failures-section" id="skippedSection" style="display: none;">
+                        <h4>Skipped Tests</h4>
+                        <div id="skippedTestsList" class="failures-list"></div>
+                    </div>
+
+                    <!-- AI Chat Interface -->
+                    <div class="ai-chat-section" id="aiChatSection" style="display: none;">
+                        <div class="chat-header">
+                            <h4>💬 Chat with AI about failures</h4>
+                            <button class="btn btn-sm" onclick="toggleChat()">Close</button>
+                        </div>
+                        <div class="chat-messages" id="chatMessages"></div>
+                        <div class="chat-input-area">
+                            <input type="text" id="chatInput" placeholder="Ask a question about the failures..." class="chat-input">
+                            <button class="btn" onclick="sendChatMessage()">Send</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tableViewTab">
+                <div class="table-view-header">
+                    <h3 id="tableViewTitle">Test Results Table</h3>
+                    <div class="table-filters">
+                        <label>
+                            <input type="checkbox" id="filterFailed" checked onchange="filterTableResults()"> Failed
+                        </label>
+                        <label>
+                            <input type="checkbox" id="filterSkipped" checked onchange="filterTableResults()"> Skipped
+                        </label>
+                        <label>
+                            <input type="checkbox" id="filterErrors" checked onchange="filterTableResults()"> Errors
+                        </label>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table id="testResultsTable" class="test-results-table">
+                        <thead>
+                            <tr>
+                                <th>Test Path</th>
+                                <th>Status</th>
+                                <th>Error Message</th>
+                                <th>Duration</th>
+                            </tr>
+                        </thead>
+                        <tbody id="testResultsTableBody">
+                            <tr>
+                                <td colspan="4" class="loading">No test results loaded</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- File Viewer Modal - Disabled, using tab-based viewer instead -->
+        <div class="modal" id="fileViewer" style="display: none !important;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="viewerTitle">File Content</h3>
+                    <button class="btn-close" onclick="closeViewer()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <pre id="fileContent">Loading...</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

@@ -595,12 +595,12 @@
 
                 const data = await response.json();
 
-                if (data.success) {
+                if (response.ok && data.success) {
                     currentJobId = data.job_id;
                     updateProgress(10, 'File uploaded, starting extraction...');
                     pollProgress();
                 } else {
-                    showError(data.error || 'Upload failed');
+                    showError(data.message || data.error || 'Upload failed');
                     uploadBtn.disabled = false;
                 }
             } catch (error) {

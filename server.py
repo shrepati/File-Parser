@@ -23,7 +23,7 @@ CORS(app)
 UPLOAD_FOLDER = 'uploads'
 EXTRACT_FOLDER = 'extracted'
 ALLOWED_EXTENSIONS = {'zip', 'tar', 'gz', 'bz2', 'xz', 'tgz', 'rar', '7z'}
-MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['EXTRACT_FOLDER'] = EXTRACT_FOLDER
@@ -76,20 +76,41 @@ def extract_archive(file_path, extract_to, job_id):
                 total_files = len(members)
                 skipped_files = []
 
-                for i, member in enumerate(members):
+                # For small archives (< 1000 files), extract all at once for speed
+                if total_files < 1000:
                     try:
-                        zip_ref.extract(member, extract_to)
-                    except (PermissionError, OSError) as e:
-                        # Skip files with permission issues
-                        skipped_files.append(member)
-                        print(f"Skipped {member}: {e}")
+                        zip_ref.extractall(extract_to)
+                        extraction_progress[job_id].update({
+                            'progress': 90,
+                            'message': f'Extracted all {total_files} files'
+                        })
+                    except Exception as e:
+                        print(f"Bulk extraction failed, falling back to individual extraction: {e}")
+                        # Fall back to individual extraction if bulk fails
+                        for member in members:
+                            try:
+                                zip_ref.extract(member, extract_to)
+                            except (PermissionError, OSError) as err:
+                                skipped_files.append(member)
+                else:
+                    # For large archives, extract with progress tracking
+                    update_interval = max(1, total_files // 100)  # Update 100 times max
 
-                    progress = 10 + int((i + 1) / total_files * 80)
-                    extraction_progress[job_id].update({
-                        'progress': progress,
-                        'message': f'Extracting: {member} ({i+1}/{total_files})'
-                    })
-                    time.sleep(0.01)  # Small delay to show progress
+                    for i, member in enumerate(members):
+                        try:
+                            zip_ref.extract(member, extract_to)
+                        except (PermissionError, OSError) as e:
+                            # Skip files with permission issues
+                            skipped_files.append(member)
+                            print(f"Skipped {member}: {e}")
+
+                        # Update progress less frequently for large archives
+                        if i % update_interval == 0 or i == total_files - 1:
+                            progress = 10 + int((i + 1) / total_files * 80)
+                            extraction_progress[job_id].update({
+                                'progress': progress,
+                                'message': f'Extracting: {i+1}/{total_files} files'
+                            })
 
                 if skipped_files:
                     print(f"Skipped {len(skipped_files)} files due to permission errors")
@@ -114,23 +135,32 @@ def extract_archive(file_path, extract_to, job_id):
                 total_files = len(members)
                 skipped_files = []
 
+                # Update progress every N files for better performance
+                update_interval = max(1, total_files // 100)  # Update 100 times max
+
                 for i, member in enumerate(members):
                     try:
-                        tar_ref.extract(member, extract_to)
-                    except (PermissionError, OSError) as e:
-                        # Skip files with permission issues
+                        # Use data_filter to safely handle absolute paths and symlinks
+                        # This filter:
+                        # - Strips leading slashes from absolute paths
+                        # - Makes symlinks relative and safe
+                        # - Skips device files
+                        tar_ref.extract(member, extract_to, filter='data')
+                    except (PermissionError, OSError, tarfile.ExtractError, tarfile.AbsoluteLinkError) as e:
+                        # Skip files with permission issues or unsafe links
                         skipped_files.append(member.name)
                         print(f"Skipped {member.name}: {e}")
 
-                    progress = 10 + int((i + 1) / total_files * 80)
-                    extraction_progress[job_id].update({
-                        'progress': progress,
-                        'message': f'Extracting: {member.name} ({i+1}/{total_files})'
-                    })
-                    time.sleep(0.01)
+                    # Update progress less frequently for large archives
+                    if i % update_interval == 0 or i == total_files - 1:
+                        progress = 10 + int((i + 1) / total_files * 80)
+                        extraction_progress[job_id].update({
+                            'progress': progress,
+                            'message': f'Extracting: {i+1}/{total_files} files'
+                        })
 
                 if skipped_files:
-                    print(f"Skipped {len(skipped_files)} files due to permission errors")
+                    print(f"Skipped {len(skipped_files)} files due to errors (permissions, unsafe links, etc.)")
 
         else:
             extraction_progress[job_id].update({
@@ -139,13 +169,6 @@ def extract_archive(file_path, extract_to, job_id):
                 'message': f'Unsupported file format: {file_ext}'
             })
             return
-
-        extraction_progress[job_id].update({
-            'status': 'analyzing',
-            'progress': 95,
-            'message': 'Analyzing extracted files...'
-        })
-        time.sleep(0.5)
 
         extraction_progress[job_id].update({
             'status': 'completed',
@@ -161,8 +184,14 @@ def extract_archive(file_path, extract_to, job_id):
         })
 
 
-def scan_directory(path, recursive=True):
-    """Scan directory and return file/folder structure"""
+def scan_directory(path, recursive=True, calculate_dir_sizes=False):
+    """Scan directory and return file/folder structure
+
+    Args:
+        path: Directory to scan
+        recursive: If True, scan all subdirectories
+        calculate_dir_sizes: If True, calculate directory sizes (slow for large trees)
+    """
     files = []
     directories = []
     total_size = 0
@@ -174,22 +203,23 @@ def scan_directory(path, recursive=True):
                 dir_path = os.path.join(root, dir_name)
                 rel_path = os.path.relpath(dir_path, path)
 
-                # Calculate directory size
+                # Skip expensive directory size calculation by default
                 dir_size = 0
-                for r, d, f in os.walk(dir_path):
-                    for file in f:
-                        fp = os.path.join(r, file)
-                        if os.path.exists(fp):
-                            try:
-                                dir_size += os.path.getsize(fp)
-                            except (PermissionError, OSError):
-                                pass
+                if calculate_dir_sizes:
+                    for r, d, f in os.walk(dir_path):
+                        for file in f:
+                            fp = os.path.join(r, file)
+                            if os.path.exists(fp):
+                                try:
+                                    dir_size += os.path.getsize(fp)
+                                except (PermissionError, OSError):
+                                    pass
 
                 directories.append({
                     'name': dir_name,
                     'path': rel_path,
                     'size': dir_size,
-                    'size_human': get_file_size_human(dir_size)
+                    'size_human': get_file_size_human(dir_size) if dir_size > 0 else 'Unknown'
                 })
 
             for filename in filenames:
@@ -219,22 +249,23 @@ def scan_directory(path, recursive=True):
                 item_path = os.path.join(path, item)
 
                 if os.path.isdir(item_path):
-                    # Calculate directory size
+                    # Skip expensive directory size calculation by default
                     dir_size = 0
-                    try:
-                        for r, d, f in os.walk(item_path):
-                            for file in f:
-                                fp = os.path.join(r, file)
-                                if os.path.exists(fp):
-                                    dir_size += os.path.getsize(fp)
-                    except (PermissionError, OSError):
-                        pass
+                    if calculate_dir_sizes:
+                        try:
+                            for r, d, f in os.walk(item_path):
+                                for file in f:
+                                    fp = os.path.join(r, file)
+                                    if os.path.exists(fp):
+                                        dir_size += os.path.getsize(fp)
+                        except (PermissionError, OSError):
+                            pass
 
                     directories.append({
                         'name': item,
                         'path': item,
                         'size': dir_size,
-                        'size_human': get_file_size_human(dir_size)
+                        'size_human': get_file_size_human(dir_size) if dir_size > 0 else 'Unknown'
                     })
                 else:
                     try:
@@ -259,6 +290,24 @@ def scan_directory(path, recursive=True):
         'total_size': total_size,
         'total_size_human': get_file_size_human(total_size)
     }
+
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    """Handle file too large error"""
+    return jsonify({
+        'error': 'File too large',
+        'message': f'File size exceeds the maximum allowed size of {get_file_size_human(MAX_FILE_SIZE)}'
+    }), 413
+
+
+@app.errorhandler(500)
+def internal_server_error(error):
+    """Handle internal server errors"""
+    return jsonify({
+        'error': 'Internal server error',
+        'message': str(error)
+    }), 500
 
 
 @app.route('/')

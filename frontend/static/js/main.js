@@ -1,0 +1,1211 @@
+// Main Application JavaScript
+
+let currentJobId = null;
+let currentPage = 1;
+const itemsPerPage = 50;
+
+// DOM Elements
+const uploadArea = document.getElementById('uploadArea');
+const fileInput = document.getElementById('fileInput');
+const selectBtn = document.getElementById('selectBtn');
+const selectedFile = document.getElementById('selectedFile');
+const fileName = document.getElementById('fileName');
+const uploadBtn = document.getElementById('uploadBtn');
+const progressSection = document.getElementById('progressSection');
+const resultsSection = document.getElementById('resultsSection');
+
+// Upload handlers
+selectBtn.addEventListener('click', () => fileInput.click());
+uploadArea.addEventListener('click', (e) => {
+    if (e.target !== selectBtn) fileInput.click();
+});
+
+uploadArea.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    uploadArea.style.background = '#e8eaff';
+});
+
+uploadArea.addEventListener('dragleave', () => {
+    uploadArea.style.background = '';
+});
+
+uploadArea.addEventListener('drop', (e) => {
+    e.preventDefault();
+    uploadArea.style.background = '';
+    if (e.dataTransfer.files.length > 0) {
+        fileInput.files = e.dataTransfer.files;
+        handleFileSelect();
+    }
+});
+
+fileInput.addEventListener('change', handleFileSelect);
+uploadBtn.addEventListener('click', uploadFile);
+
+function handleFileSelect() {
+    if (fileInput.files.length > 0) {
+        fileName.textContent = fileInput.files[0].name;
+        selectedFile.style.display = 'block';
+    }
+}
+
+async function uploadFile() {
+    if (fileInput.files.length === 0) return;
+
+    const formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+
+    uploadBtn.disabled = true;
+    progressSection.classList.add('active');
+    document.getElementById('uploadSection').style.display = 'none';
+    resultsSection.classList.remove('active');
+
+    updateProgress(5, 'Uploading file...');
+
+    try {
+        const response = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            currentJobId = data.job_id;
+            updateProgress(10, 'File uploaded, starting extraction...');
+            pollProgress();
+        } else {
+            showError(data.message || data.error || 'Upload failed');
+            uploadBtn.disabled = false;
+        }
+    } catch (error) {
+        showError('Upload error: ' + error.message);
+        uploadBtn.disabled = false;
+    }
+}
+
+async function pollProgress() {
+    try {
+        const response = await fetch(`/api/progress/${currentJobId}`);
+        const data = await response.json();
+
+        updateProgress(data.progress, data.message);
+
+        if (data.status === 'completed') {
+            setTimeout(() => loadResults(), 500);
+        } else if (data.status === 'error') {
+            showError(data.message);
+            uploadBtn.disabled = false;
+        } else {
+            setTimeout(pollProgress, 300);
+        }
+    } catch (error) {
+        showError('Progress check error: ' + error.message);
+        uploadBtn.disabled = false;
+    }
+}
+
+function updateProgress(percent, message) {
+    const progressBar = document.getElementById('progressBar');
+    const statusMessage = document.getElementById('statusMessage');
+    progressBar.style.width = percent + '%';
+    progressBar.textContent = percent + '%';
+    statusMessage.textContent = message;
+}
+
+async function loadResults() {
+    try {
+        const response = await fetch(`/api/summary/${currentJobId}`);
+        const data = await response.json();
+
+        // Update total size
+        document.getElementById('totalSize').textContent = data.total_size_human;
+
+        // Show RHOSO card if test results found
+        if (data.has_rhoso_tests) {
+            document.getElementById('rhosoCard').style.display = 'block';
+            document.getElementById('rhosoCount').textContent = data.rhoso_folders.length;
+            document.getElementById('resultsTabBtn').style.display = 'block';
+        }
+
+        progressSection.classList.remove('active');
+        resultsSection.classList.add('active');
+        uploadBtn.disabled = false;
+
+        // Load tree view by default
+        loadTree();
+
+        // Discover RHOSO test folders
+        discoverRHOSOFolders();
+
+    } catch (error) {
+        showError('Failed to load results: ' + error.message);
+        uploadBtn.disabled = false;
+    }
+}
+
+async function loadFiles(page = 1) {
+    try {
+        const response = await fetch(`/api/browse/${currentJobId}?page=${page}&per_page=${itemsPerPage}&sort=name&dir=asc`);
+        const data = await response.json();
+
+        displayItems(data.items, 'filesList');
+        displayPagination(data.pagination, 'filesPagination', loadFiles);
+
+    } catch (error) {
+        console.error('Error loading files:', error);
+    }
+}
+
+async function loadDirectories(page = 1) {
+    try {
+        const response = await fetch(`/api/browse/${currentJobId}?page=${page}&per_page=${itemsPerPage}&sort=name&dir=asc`);
+        const data = await response.json();
+
+        // Filter only directories
+        const dirs = data.items.filter(item => !item.size);
+        displayItems(dirs, 'dirsList');
+
+    } catch (error) {
+        console.error('Error loading directories:', error);
+    }
+}
+
+function displayItems(items, containerId) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = '';
+
+    if (items.length === 0) {
+        container.innerHTML = '<p style="text-align:center;padding:40px;color:#999;">No items found</p>';
+        return;
+    }
+
+    items.forEach(item => {
+        const itemDiv = document.createElement('div');
+        itemDiv.className = 'item';
+
+        const isDir = !item.size;
+        const icon = isDir ? '📁' : '📄';
+
+        itemDiv.innerHTML = `
+            <div class="item-info">
+                <div>${icon} <strong>${item.name}</strong></div>
+                <div style="font-size:0.9em;color:#666;">${item.path} • ${item.size_human || 'Directory'}</div>
+            </div>
+            ${!isDir ? `
+            <div class="item-actions">
+                <button class="item-btn" onclick="viewFile('${item.path}')">View</button>
+                <button class="item-btn" onclick="downloadFile('${item.path}')">Download</button>
+            </div>
+            ` : ''}
+        `;
+
+        container.appendChild(itemDiv);
+    });
+}
+
+function displayPagination(pagination, containerId, loadFunction) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = '';
+
+    if (pagination.total_pages <= 1) return;
+
+    for (let i = 1; i <= pagination.total_pages; i++) {
+        const btn = document.createElement('button');
+        btn.className = 'page-btn' + (i === pagination.page ? ' active' : '');
+        btn.textContent = i;
+        btn.onclick = () => loadFunction(i);
+        container.appendChild(btn);
+    }
+}
+
+let currentViewedFile = null;
+
+async function viewFile(filePath) {
+    // Store current file for download
+    currentViewedFile = filePath;
+
+    // Update UI
+    const fileName = filePath.split('/').pop();
+    document.getElementById('viewerFileName').textContent = fileName;
+    document.getElementById('downloadFileBtn').style.display = 'inline-block';
+    document.getElementById('fileViewerTabBtn').style.display = 'block';
+
+    // Show file viewer tab
+    showTab('viewer');
+
+    const content = document.getElementById('fileViewerContent');
+    content.innerHTML = '<div style="text-align: center; padding: 40px; color: #999;">Loading...</div>';
+
+    try {
+        const response = await fetch(`/api/read/${currentJobId}/${filePath}`);
+        const data = await response.json();
+
+        if (data.success) {
+            // Get file extension
+            const ext = fileName.split('.').pop().toLowerCase();
+
+            // Update file size
+            document.getElementById('viewerFileSize').textContent = data.size_human || '';
+
+            // Render based on file type
+            renderFileContent(data.content, ext, content);
+        } else {
+            content.innerHTML = `<div class="error-message">Error: ${data.error}<br>${data.message || ''}</div>`;
+        }
+    } catch (error) {
+        content.innerHTML = `<div class="error-message">Failed to load file: ${error.message}</div>`;
+    }
+}
+
+function renderFileContent(fileContent, extension, container) {
+    // Clear previous classes
+    container.className = 'file-viewer-content';
+
+    // HTML files - render as actual HTML
+    if (extension === 'html' || extension === 'htm') {
+        container.classList.add('html-file');
+        // Create iframe to safely render HTML
+        const iframe = document.createElement('iframe');
+        iframe.style.width = '100%';
+        iframe.style.height = '700px';
+        iframe.style.border = 'none';
+        iframe.style.background = 'white';
+        container.innerHTML = '';
+        container.appendChild(iframe);
+
+        // Write HTML content to iframe
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+        iframeDoc.open();
+        iframeDoc.write(fileContent);
+        iframeDoc.close();
+        return;
+    }
+
+    // Image files
+    if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp'].includes(extension)) {
+        container.classList.add('image-file');
+        container.innerHTML = `<img src="data:image/${extension};base64,${fileContent}" alt="Image preview">`;
+        return;
+    }
+
+    // Log files - highlight errors, warnings
+    if (['log', 'txt'].includes(extension)) {
+        container.classList.add('log-file');
+        const highlighted = highlightLogFile(fileContent);
+        container.innerHTML = `<pre>${highlighted}</pre>`;
+        return;
+    }
+
+    // XML files - code styling but not HTML rendering
+    if (extension === 'xml') {
+        container.classList.add('code-file');
+        container.innerHTML = `<pre>${escapeHtml(fileContent)}</pre>`;
+        return;
+    }
+
+    // Code files - different styling
+    if (['py', 'js', 'java', 'c', 'cpp', 'h', 'sh', 'bash', 'yaml', 'yml', 'json', 'css', 'sql'].includes(extension)) {
+        container.classList.add('code-file');
+        container.innerHTML = `<pre>${escapeHtml(fileContent)}</pre>`;
+        return;
+    }
+
+    // Default: plain text
+    container.classList.add('text-file');
+    container.innerHTML = `<pre>${escapeHtml(fileContent)}</pre>`;
+}
+
+function highlightLogFile(content) {
+    const lines = content.split('\n');
+    return lines.map(line => {
+        const lowerLine = line.toLowerCase();
+        if (lowerLine.includes('error') || lowerLine.includes('fail') || lowerLine.includes('exception')) {
+            return `<span class="log-error">${escapeHtml(line)}</span>`;
+        } else if (lowerLine.includes('warn')) {
+            return `<span class="log-warning">${escapeHtml(line)}</span>`;
+        } else if (lowerLine.includes('info')) {
+            return `<span class="log-info">${escapeHtml(line)}</span>`;
+        } else if (lowerLine.includes('debug')) {
+            return `<span class="log-debug">${escapeHtml(line)}</span>`;
+        }
+        return escapeHtml(line);
+    }).join('\n');
+}
+
+function downloadFile(filePath) {
+    window.open(`/api/download/${currentJobId}/${filePath}`, '_blank');
+}
+
+function downloadCurrentFile() {
+    if (currentViewedFile) {
+        downloadFile(currentViewedFile);
+    }
+}
+
+function closeViewer() {
+    // Legacy modal closer - no longer used
+    document.getElementById('fileViewer').classList.remove('active');
+}
+
+function closeFileViewer() {
+    // Hide the file viewer tab and go back to tree view
+    showTab('tree');
+    document.getElementById('fileViewerTabBtn').style.display = 'none';
+    currentViewedFile = null;
+}
+
+async function performSearch() {
+    const query = document.getElementById('searchInput').value.trim();
+    if (!query) return;
+
+    try {
+        const response = await fetch(`/api/search/${currentJobId}?q=${encodeURIComponent(query)}&page=1&per_page=${itemsPerPage}`);
+        const data = await response.json();
+
+        displayItems(data.items, 'filesList');
+        displayPagination(data.pagination, 'filesPagination', (page) => searchPage(query, page));
+
+    } catch (error) {
+        console.error('Search error:', error);
+    }
+}
+
+async function searchPage(query, page) {
+    try {
+        const response = await fetch(`/api/search/${currentJobId}?q=${encodeURIComponent(query)}&page=${page}&per_page=${itemsPerPage}`);
+        const data = await response.json();
+
+        displayItems(data.items, 'filesList');
+        displayPagination(data.pagination, 'filesPagination', (p) => searchPage(query, p));
+
+    } catch (error) {
+        console.error('Search error:', error);
+    }
+}
+
+async function loadTree() {
+    try {
+        const treeView = document.getElementById('treeView');
+        treeView.innerHTML = '<div class="loading">Loading file structure...</div>';
+
+        // Fetch ALL files and directories
+        const response = await fetch(`/api/all-files/${currentJobId}`);
+        const data = await response.json();
+
+        console.log(`Loading tree with ${data.total} items`);
+
+        // Build tree structure from flat list
+        const tree = buildTreeStructure(data.items);
+
+        // Render the tree
+        treeView.innerHTML = '<div class="tree-container">' + renderTree(tree, 0) + '</div>';
+
+    } catch (error) {
+        console.error('Tree loading error:', error);
+        document.getElementById('treeView').innerHTML = '<div class="error-message">Failed to load file structure</div>';
+    }
+}
+
+function buildTreeStructure(items) {
+    const root = { name: 'root', type: 'directory', path: '', children: {} };
+
+    items.forEach(item => {
+        const parts = item.relative_path.split('/').filter(p => p);
+        let current = root;
+
+        parts.forEach((part, index) => {
+            if (!current.children[part]) {
+                current.children[part] = {
+                    name: part,
+                    type: index === parts.length - 1 ? item.type : 'directory',
+                    path: parts.slice(0, index + 1).join('/'),
+                    size: item.size,
+                    children: {}
+                };
+            }
+            current = current.children[part];
+        });
+    });
+
+    return root;
+}
+
+function renderTree(node, level = 0) {
+    if (level === 0 && node.name === 'root') {
+        // Render root's children
+        let html = '';
+        Object.values(node.children).forEach(child => {
+            html += renderTree(child, 0);
+        });
+        return html;
+    }
+
+    const indent = level * 20; // Use pixels for better control
+    let html = '';
+
+    if (node.type === 'directory') {
+        const childrenHtml = Object.values(node.children).map(child => renderTree(child, level + 1)).join('');
+        const hasChildren = Object.keys(node.children).length > 0;
+
+        html += `
+            <div class="tree-item tree-directory" style="padding-left: ${indent}px;">
+                <span class="tree-toggle" onclick="toggleDirectory(this)" style="cursor: pointer;">
+                    ${hasChildren ? '▶' : ''}
+                </span>
+                <span class="tree-icon">📁</span>
+                <span class="tree-name">${escapeHtml(node.name)}</span>
+            </div>
+            ${hasChildren ? `<div class="tree-children" style="display: none;">${childrenHtml}</div>` : ''}
+        `;
+    } else {
+        const sizeStr = formatFileSize(node.size || 0);
+        html += `
+            <div class="tree-item tree-file" style="padding-left: ${indent}px;" onclick="viewFile('${escapeHtml(node.path)}')">
+                <span class="tree-toggle"></span>
+                <span class="tree-icon">📄</span>
+                <span class="tree-name">${escapeHtml(node.name)}</span>
+                <span class="tree-size">${sizeStr}</span>
+            </div>
+        `;
+    }
+
+    return html;
+}
+
+function toggleDirectory(element) {
+    const item = element.parentElement;
+    const children = item.nextElementSibling;
+
+    if (children && children.classList.contains('tree-children')) {
+        if (children.style.display === 'none') {
+            children.style.display = 'block';
+            element.textContent = '▼';
+        } else {
+            children.style.display = 'none';
+            element.textContent = '▶';
+        }
+    }
+}
+
+function showTab(tabName) {
+    // Hide all tab contents
+    document.querySelectorAll('.tab-content').forEach(tab => {
+        tab.classList.remove('active');
+    });
+
+    // Deactivate all tab buttons
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+    });
+
+    // Show selected tab
+    const tabMap = {
+        'tree': 'treeTab',
+        'viewer': 'viewerTab',
+        'results': 'resultsTab',
+        'tableview': 'tableViewTab'
+    };
+
+    document.getElementById(tabMap[tabName]).classList.add('active');
+
+    // Activate corresponding button
+    const buttonMap = {
+        'tree': document.querySelector('.tab-btn'),
+        'viewer': document.getElementById('fileViewerTabBtn'),
+        'results': document.getElementById('resultsTabBtn'),
+        'tableview': document.getElementById('tableViewTabBtn')
+    };
+
+    if (buttonMap[tabName]) {
+        buttonMap[tabName].classList.add('active');
+    }
+
+    // Load content
+    if (tabName === 'tree') {
+        loadTree();
+    } else if (tabName === 'results') {
+        loadAvailableBackends();
+    }
+}
+
+function showError(message) {
+    const statusMessage = document.getElementById('statusMessage');
+    statusMessage.innerHTML = `<div style="background:#ff4757;color:white;padding:15px;border-radius:8px;">${message}</div>`;
+}
+
+function resetApp() {
+    currentJobId = null;
+    currentPage = 1;
+
+    progressSection.classList.remove('active');
+    resultsSection.classList.remove('active');
+    document.getElementById('uploadSection').style.display = 'block';
+    document.getElementById('fileViewer').classList.remove('active');
+
+    fileInput.value = '';
+    selectedFile.style.display = 'none';
+    document.getElementById('rhosoCard').style.display = 'none';
+    document.getElementById('resultsTabBtn').style.display = 'none';
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// Search on Enter key
+document.getElementById('searchInput')?.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') performSearch();
+});
+
+// ============================================
+// RHOSO Test Results Tab Functionality
+// ============================================
+
+const ANALYSIS_SERVICE_URL = 'http://localhost:8001';
+let rhosoFolders = [];
+let currentTestFolder = null;
+let currentTestResults = null;
+let chatHistory = [];
+
+// Discover RHOSO test folders
+async function discoverRHOSOFolders() {
+    if (!currentJobId) return;
+
+    const extractPath = `/home/atiwary/test/Cursor_testing/Ai-assisted_RHOSO_result_parser/File-Parser/extracted/${currentJobId}`;
+
+    try {
+        const response = await fetch(`${ANALYSIS_SERVICE_URL}/api/analysis/discover`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                job_id: currentJobId,
+                extract_path: extractPath
+            })
+        });
+
+        if (!response.ok) throw new Error('Failed to discover RHOSO folders');
+
+        const data = await response.json();
+        rhosoFolders = data.rhoso_folders || [];
+
+        displayRHOSOFolders();
+
+        // Show RHOSO card if folders found
+        if (rhosoFolders.length > 0) {
+            document.getElementById('rhosoCard').style.display = 'block';
+            document.getElementById('rhosoCount').textContent = rhosoFolders.length;
+            document.getElementById('resultsTabBtn').style.display = 'block';
+        }
+
+    } catch (error) {
+        console.error('Error discovering RHOSO folders:', error);
+        document.getElementById('rhosoFoldersList').innerHTML =
+            `<div class="error-message">Error discovering RHOSO test folders: ${error.message}</div>`;
+    }
+}
+
+// Display RHOSO folder cards
+function displayRHOSOFolders() {
+    const container = document.getElementById('rhosoFoldersList');
+
+    if (rhosoFolders.length === 0) {
+        container.innerHTML = '<div class="loading">No RHOSO test folders found in this archive.</div>';
+        return;
+    }
+
+    let html = '';
+    rhosoFolders.forEach(folder => {
+        const icon = folder.has_xml ? '📊' : '📁';
+        const formatInfo = [];
+        if (folder.has_xml) formatInfo.push('XML Results');
+        if (folder.has_mustgather) formatInfo.push('Must-Gather');
+
+        html += `
+            <div class="rhoso-folder-card" onclick="loadTestResults('${folder.path}', '${folder.name}')">
+                <div class="rhoso-folder-icon">${icon}</div>
+                <div class="rhoso-folder-name">${folder.name}</div>
+                <div class="rhoso-folder-info">${formatInfo.join(' • ')}</div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+}
+
+// Load and parse test results for a folder
+async function loadTestResults(folderPath, folderName) {
+    currentTestFolder = folderPath;
+
+    // Hide folders list, show results container
+    document.getElementById('rhosoFoldersList').style.display = 'none';
+    document.getElementById('testResultsContainer').style.display = 'block';
+    document.getElementById('currentTestFolder').textContent = folderName;
+
+    // Reset state
+    document.getElementById('aiAnalysisResult').style.display = 'none';
+    document.getElementById('aiChatSection').style.display = 'none';
+    chatHistory = [];
+
+    const extractPath = `/home/atiwary/test/Cursor_testing/Ai-assisted_RHOSO_result_parser/File-Parser/extracted/${currentJobId}`;
+
+    try {
+        const response = await fetch(`${ANALYSIS_SERVICE_URL}/api/analysis/parse`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                job_id: currentJobId,
+                test_folder: folderPath,
+                extract_path: extractPath,
+                formats: ['xml']  // Only XML format supported
+            })
+        });
+
+        if (!response.ok) throw new Error('Failed to parse test results');
+
+        currentTestResults = await response.json();
+        displayTestResults(currentTestResults);
+
+    } catch (error) {
+        console.error('Error loading test results:', error);
+        document.getElementById('testSummaryCards').innerHTML =
+            `<div class="error-message">Error loading test results: ${error.message}</div>`;
+    }
+}
+
+// Display test summary and failures
+function displayTestResults(results) {
+    // Display summary cards
+    const summaryHTML = `
+        <div class="test-summary-card">
+            <div class="test-card-number">${results.total_tests}</div>
+            <div class="test-card-label">Total Tests</div>
+        </div>
+        <div class="test-summary-card passed">
+            <div class="test-card-number">${results.passed}</div>
+            <div class="test-card-label">Passed</div>
+        </div>
+        <div class="test-summary-card failed">
+            <div class="test-card-number">${results.failed}</div>
+            <div class="test-card-label">Failed</div>
+        </div>
+        <div class="test-summary-card skipped">
+            <div class="test-card-number">${results.skipped}</div>
+            <div class="test-card-label">Skipped</div>
+        </div>
+        <div class="test-summary-card failed">
+            <div class="test-card-number">${results.errors}</div>
+            <div class="test-card-label">Errors</div>
+        </div>
+    `;
+    document.getElementById('testSummaryCards').innerHTML = summaryHTML;
+
+    // Update failures section title
+    const failuresSection = document.querySelector('.failures-section h4');
+    if (failuresSection) {
+        failuresSection.textContent = 'Test Failures';
+    }
+
+    // Display failures (only failed and error tests)
+    displayFailures(results.failures || []);
+
+    // Display skipped tests separately if they exist
+    if (results.skipped_tests && results.skipped_tests.length > 0) {
+        displaySkippedTests(results.skipped_tests);
+    }
+
+    // Populate table view and show tab
+    populateTestTable(results);
+    document.getElementById('tableViewTabBtn').style.display = 'block';
+}
+
+// Display individual test failures
+function displayFailures(failures) {
+    const container = document.getElementById('failuresList');
+
+    if (failures.length === 0) {
+        container.innerHTML = '<div class="success-message">No test failures! All tests passed. 🎉</div>';
+        return;
+    }
+
+    let html = '';
+    failures.forEach((failure, index) => {
+        const failureId = `failure-${index}`;
+        html += `
+            <div class="failure-box" id="${failureId}">
+                <div class="failure-header" onclick="toggleFailure('${failureId}')">
+                    <div class="failure-title">
+                        ${failure.test_name || 'Unknown Test'}
+                    </div>
+                    <div class="failure-toggle">►</div>
+                </div>
+                <div class="failure-content">
+                    <div class="failure-info">
+                        <div class="failure-label">Class:</div>
+                        <div>${failure.class_name || 'Unknown'}</div>
+                    </div>
+                    <div class="failure-info">
+                        <div class="failure-label">Type:</div>
+                        <div>${failure.failure_type || 'failure'}</div>
+                    </div>
+                    ${failure.error_message ? `
+                        <div class="failure-error">
+                            <div class="failure-label">Error Message:</div>
+                            ${escapeHtml(failure.error_message)}
+                        </div>
+                    ` : ''}
+                    ${failure.traceback ? `
+                        <div class="failure-info">
+                            <div class="failure-label">Traceback:</div>
+                            <div class="failure-traceback">${escapeHtml(failure.traceback)}</div>
+                        </div>
+                    ` : ''}
+                    ${failure.correlated_logs && failure.correlated_logs.length > 0 ? `
+                        <div class="failure-info">
+                            <div class="failure-label">Related Must-Gather Logs:</div>
+                            <ul>
+                                ${failure.correlated_logs.map(log => `<li>${log}</li>`).join('')}
+                            </ul>
+                        </div>
+                    ` : ''}
+                    <div class="failure-actions">
+                        <button class="btn btn-sm" onclick="askAIAboutFailure(${index})">💬 Ask AI</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+}
+
+// Display skipped tests separately
+function displaySkippedTests(skippedTests) {
+    const container = document.getElementById('skippedTestsList');
+    const section = document.getElementById('skippedSection');
+
+    if (skippedTests.length === 0) {
+        section.style.display = 'none';
+        return;
+    }
+
+    section.style.display = 'block';
+
+    let html = '';
+    skippedTests.forEach((test, index) => {
+        const skipId = `skip-${index}`;
+        html += `
+            <div class="failure-box skipped-box" id="${skipId}">
+                <div class="failure-header" onclick="toggleFailure('${skipId}')">
+                    <div class="failure-title">
+                        ⏭️ ${test.test_name || 'Unknown Test'}
+                    </div>
+                    <div class="failure-toggle">►</div>
+                </div>
+                <div class="failure-content">
+                    <div class="failure-info">
+                        <div class="failure-label">Class:</div>
+                        <div>${test.class_name || 'Unknown'}</div>
+                    </div>
+                    <div class="failure-info">
+                        <div class="failure-label">Status:</div>
+                        <div><span style="color: #f39c12; font-weight: bold;">SKIPPED</span></div>
+                    </div>
+                    ${test.error_message ? `
+                        <div class="failure-info">
+                            <div class="failure-label">Skip Reason:</div>
+                            <div style="padding: 10px; background: #fef5e7; border-left: 3px solid #f39c12; border-radius: 5px;">
+                                ${escapeHtml(test.error_message)}
+                            </div>
+                        </div>
+                    ` : ''}
+                </div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+}
+
+// Toggle failure box expansion
+function toggleFailure(failureId) {
+    const box = document.getElementById(failureId);
+    box.classList.toggle('expanded');
+}
+
+// Populate test results table
+function populateTestTable(results) {
+    console.log('populateTestTable called with results:', results);
+    const tbody = document.getElementById('testResultsTableBody');
+    const tableTitle = document.getElementById('tableViewTitle');
+
+    if (!tbody) {
+        console.error('testResultsTableBody element not found!');
+        return;
+    }
+
+    // Update title with folder name
+    tableTitle.textContent = `Test Results Table - ${currentTestFolder}`;
+
+    // Combine all test results (failures, errors, and skipped)
+    const allTests = [];
+
+    // Add failures and errors
+    if (results.failures && results.failures.length > 0) {
+        results.failures.forEach(test => {
+            allTests.push({
+                test_name: test.test_name || 'Unknown',
+                class_name: test.class_name || 'Unknown',
+                status: test.failure_type === 'error' ? 'error' : 'failed',
+                error_message: test.error_message || '',
+                duration: test.duration || 0
+            });
+        });
+    }
+
+    // Add skipped tests
+    if (results.skipped_tests && results.skipped_tests.length > 0) {
+        results.skipped_tests.forEach(test => {
+            allTests.push({
+                test_name: test.test_name || 'Unknown',
+                class_name: test.class_name || 'Unknown',
+                status: 'skipped',
+                error_message: test.error_message || '',
+                duration: test.duration || 0
+            });
+        });
+    }
+
+    console.log('Total tests to display in table:', allTests.length);
+
+    if (allTests.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="loading">No failed or skipped tests found</td></tr>';
+        console.log('No tests to display - showing empty message');
+        return;
+    }
+
+    // Build table rows
+    let html = '';
+    allTests.forEach((test, index) => {
+        const statusClass = test.status === 'failed' ? 'status-failed' :
+                           test.status === 'skipped' ? 'status-skipped' : 'status-error';
+        const statusText = test.status === 'failed' ? 'Failed' :
+                          test.status === 'skipped' ? 'Skipped' : 'Error';
+
+        // Remove square bracket content from test name: test_name[params] -> test_name
+        const cleanTestName = test.test_name.replace(/\[.*?\]/g, '');
+
+        // Merge class name and test name: class_name.test_name
+        const fullTestPath = `${test.class_name}.${cleanTestName}`;
+
+        html += `
+            <tr data-status="${test.status}">
+                <td>${escapeHtml(fullTestPath)}</td>
+                <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                <td>${escapeHtml(test.error_message)}</td>
+                <td class="duration-cell">${test.duration.toFixed(2)}s</td>
+            </tr>
+        `;
+    });
+
+    tbody.innerHTML = html;
+    console.log('Table populated with', allTests.length, 'rows');
+}
+
+// Filter table results based on checkboxes
+function filterTableResults() {
+    const showFailed = document.getElementById('filterFailed').checked;
+    const showSkipped = document.getElementById('filterSkipped').checked;
+    const showErrors = document.getElementById('filterErrors').checked;
+
+    const rows = document.querySelectorAll('#testResultsTableBody tr[data-status]');
+
+    rows.forEach(row => {
+        const status = row.getAttribute('data-status');
+        let shouldShow = false;
+
+        if (status === 'failed' && showFailed) shouldShow = true;
+        if (status === 'skipped' && showSkipped) shouldShow = true;
+        if (status === 'error' && showErrors) shouldShow = true;
+
+        if (shouldShow) {
+            row.classList.remove('hidden');
+        } else {
+            row.classList.add('hidden');
+        }
+    });
+}
+
+// Start AI analysis of all failures
+async function startAIAnalysis() {
+    console.log('startAIAnalysis called');
+    const backend = document.getElementById('aiBackend').value;
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const resultDiv = document.getElementById('aiAnalysisResult');
+
+    console.log('Backend:', backend);
+    console.log('Current job ID:', currentJobId);
+    console.log('Current test folder:', currentTestFolder);
+
+    analyzeBtn.disabled = true;
+    analyzeBtn.textContent = '✨ Analyzing...';
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<div class="analysis-streaming">Starting AI analysis...</div>';
+
+    const extractPath = `/home/atiwary/test/Cursor_testing/Ai-assisted_RHOSO_result_parser/File-Parser/extracted/${currentJobId}`;
+
+    try {
+        console.log('Sending analysis request to:', `${ANALYSIS_SERVICE_URL}/api/analysis/analyze`);
+        const response = await fetch(`${ANALYSIS_SERVICE_URL}/api/analysis/analyze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                job_id: currentJobId,
+                test_folder: currentTestFolder,
+                extract_path: extractPath,
+                backend: backend,
+                stream: true
+            })
+        });
+
+        console.log('Response status:', response.status);
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Analysis request failed:', errorText);
+            throw new Error(`Analysis request failed: ${errorText}`);
+        }
+
+        // Handle SSE stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let accumulatedText = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const data = line.slice(6);
+                    if (data === '[DONE]') continue;
+
+                    try {
+                        const parsed = JSON.parse(data);
+                        if (parsed.text) {
+                            accumulatedText += parsed.text;
+                            resultDiv.innerHTML = `<div class="analysis-streaming">${escapeHtml(accumulatedText)}</div>`;
+                        }
+                    } catch (e) {
+                        console.error('Parse error:', e);
+                    }
+                }
+            }
+        }
+
+        resultDiv.innerHTML = accumulatedText;
+        analyzeBtn.disabled = false;
+        analyzeBtn.textContent = '✨ Analyze with AI';
+
+    } catch (error) {
+        console.error('AI analysis error:', error);
+        resultDiv.innerHTML = `<div class="error-message">Analysis failed: ${error.message}</div>`;
+        analyzeBtn.disabled = false;
+        analyzeBtn.textContent = '✨ Analyze with AI';
+    }
+}
+
+// Load available AI backends
+async function loadAvailableBackends() {
+    try {
+        const response = await fetch(`${ANALYSIS_SERVICE_URL}/api/analysis/backends`);
+        const data = await response.json();
+
+        const select = document.getElementById('aiBackend');
+        select.innerHTML = '';
+
+        data.available.forEach(backend => {
+            const option = document.createElement('option');
+            option.value = backend.name;
+            option.textContent = backend.display_name;
+            if (!backend.initialized) {
+                option.textContent += ' (Not Available)';
+                option.disabled = true;
+            }
+            select.appendChild(option);
+        });
+
+    } catch (error) {
+        console.error('Error loading backends:', error);
+    }
+}
+
+// Ask AI about specific failure
+function askAIAboutFailure(failureIndex) {
+    const failure = currentTestResults.failures[failureIndex];
+    const question = `Can you explain this test failure and suggest how to fix it?\n\nTest: ${failure.test_name}\nError: ${failure.error_message}`;
+
+    document.getElementById('aiChatSection').style.display = 'block';
+    document.getElementById('chatInput').value = question;
+
+    // Scroll to chat
+    document.getElementById('aiChatSection').scrollIntoView({ behavior: 'smooth' });
+}
+
+// Toggle chat visibility
+function toggleChat() {
+    const chatSection = document.getElementById('aiChatSection');
+    if (chatSection.style.display === 'none') {
+        chatSection.style.display = 'block';
+    } else {
+        chatSection.style.display = 'none';
+    }
+}
+
+// Send chat message with streaming
+async function sendChatMessage() {
+    console.log('sendChatMessage called');
+    const input = document.getElementById('chatInput');
+    const message = input.value.trim();
+    if (!message) {
+        console.log('Empty message, returning');
+        return;
+    }
+
+    const backend = document.getElementById('aiBackend').value;
+    const messagesDiv = document.getElementById('chatMessages');
+
+    console.log('Chat message:', message);
+    console.log('Backend:', backend);
+    console.log('Job ID:', currentJobId);
+    console.log('Test folder:', currentTestFolder);
+
+    // Add user message
+    addChatMessage(message, 'user');
+    chatHistory.push({ role: 'user', content: message });
+
+    input.value = '';
+    input.disabled = true;
+
+    // Add streaming assistant message
+    const assistantMsgId = `msg-${Date.now()}`;
+    const assistantMsg = document.createElement('div');
+    assistantMsg.className = 'chat-message assistant streaming';
+    assistantMsg.id = assistantMsgId;
+    assistantMsg.textContent = '';
+    messagesDiv.appendChild(assistantMsg);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+    const extractPath = `/home/atiwary/test/Cursor_testing/Ai-assisted_RHOSO_result_parser/File-Parser/extracted/${currentJobId}`;
+
+    try {
+        console.log('Sending chat request to:', `${ANALYSIS_SERVICE_URL}/api/analysis/chat`);
+        const response = await fetch(`${ANALYSIS_SERVICE_URL}/api/analysis/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                job_id: currentJobId,
+                test_folder: currentTestFolder,
+                extract_path: extractPath,
+                message: message,
+                history: chatHistory,
+                backend: backend,
+                stream: true
+            })
+        });
+
+        console.log('Chat response status:', response.status);
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Chat request failed:', errorText);
+            throw new Error(`Chat request failed: ${errorText}`);
+        }
+
+        // Handle SSE stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let accumulatedText = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const data = line.slice(6);
+                    if (data === '[DONE]') continue;
+
+                    try {
+                        const parsed = JSON.parse(data);
+                        if (parsed.text) {
+                            accumulatedText += parsed.text;
+                            assistantMsg.textContent = accumulatedText;
+                            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        }
+                    } catch (e) {
+                        console.error('Parse error:', e);
+                    }
+                }
+            }
+        }
+
+        assistantMsg.classList.remove('streaming');
+        chatHistory.push({ role: 'assistant', content: accumulatedText });
+
+    } catch (error) {
+        console.error('Chat error:', error);
+        assistantMsg.textContent = `Error: ${error.message}`;
+        assistantMsg.classList.remove('streaming');
+    } finally {
+        input.disabled = false;
+        input.focus();
+    }
+}
+
+// Add chat message to UI
+function addChatMessage(content, role) {
+    const messagesDiv = document.getElementById('chatMessages');
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `chat-message ${role}`;
+    msgDiv.textContent = content;
+    messagesDiv.appendChild(msgDiv);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+// Back to folders list
+function backToFoldersList() {
+    document.getElementById('rhosoFoldersList').style.display = 'block';
+    document.getElementById('testResultsContainer').style.display = 'none';
+    currentTestFolder = null;
+    currentTestResults = null;
+}
+
+// HTML escape utility
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Format file size
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Chat input Enter key support
+document.getElementById('chatInput')?.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChatMessage();
+    }
+});
