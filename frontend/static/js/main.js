@@ -1016,7 +1016,7 @@ async function startAIAnalysis() {
                         const parsed = JSON.parse(data);
                         if (parsed.text) {
                             accumulatedText += parsed.text;
-                            resultDiv.innerHTML = `<div class="analysis-streaming">${escapeHtml(accumulatedText)}</div>`;
+                            resultDiv.innerHTML = `<div class="analysis-streaming markdown-content">${renderMarkdown(accumulatedText)}</div>`;
                         }
                     } catch (e) {
                         console.error('Parse error:', e);
@@ -1025,7 +1025,7 @@ async function startAIAnalysis() {
             }
         }
 
-        resultDiv.innerHTML = accumulatedText;
+        resultDiv.innerHTML = `<div class="markdown-content">${renderMarkdown(accumulatedText)}</div>`;
         analyzeBtn.disabled = false;
         analyzeBtn.textContent = '✨ Analyze with AI';
 
@@ -1166,7 +1166,7 @@ async function sendChatMessage() {
                         const parsed = JSON.parse(data);
                         if (parsed.text) {
                             accumulatedText += parsed.text;
-                            assistantMsg.textContent = accumulatedText;
+                            assistantMsg.innerHTML = `<div class="markdown-content">${renderMarkdown(accumulatedText)}</div>`;
                             messagesDiv.scrollTop = messagesDiv.scrollHeight;
                         }
                     } catch (e) {
@@ -1194,7 +1194,15 @@ function addChatMessage(content, role) {
     const messagesDiv = document.getElementById('chatMessages');
     const msgDiv = document.createElement('div');
     msgDiv.className = `chat-message ${role}`;
-    msgDiv.textContent = content;
+
+    if (role === 'assistant') {
+        // Render markdown for assistant messages
+        msgDiv.innerHTML = `<div class="markdown-content">${renderMarkdown(content)}</div>`;
+    } else {
+        // Plain text for user messages
+        msgDiv.textContent = content;
+    }
+
     messagesDiv.appendChild(msgDiv);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
@@ -1212,6 +1220,24 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// Render markdown to HTML
+function renderMarkdown(text) {
+    if (typeof marked === 'undefined') {
+        // Fallback if marked is not loaded
+        return escapeHtml(text).replace(/\n/g, '<br>');
+    }
+
+    // Configure marked for safe rendering
+    marked.setOptions({
+        breaks: true,
+        gfm: true,
+        headerIds: false,
+        mangle: false
+    });
+
+    return marked.parse(text);
 }
 
 // Format file size
