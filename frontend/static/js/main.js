@@ -2,7 +2,8 @@
 
 let currentJobId = null;
 let currentPage = 1;
-const itemsPerPage = 50;
+let itemsPerPage = 1000;  // Items per page for test results pagination
+let allTestItems = [];    // Combined failures and skipped tests
 
 // Configuration loaded from backend
 let appConfig = {
@@ -256,6 +257,19 @@ async function viewFile(filePath) {
     showTab('viewer');
 
     const content = document.getElementById('fileViewerContent');
+
+    // Check if it's a rhcert XML file (before trying to read)
+    const ext = fileName.split('.').pop().toLowerCase();
+    const isRhcertXML = ext === 'xml' && fileName.includes('rhcert-results');
+
+    // For rhcert XML, show extract interface immediately (don't try to load content)
+    if (isRhcertXML) {
+        document.getElementById('viewerFileSize').textContent = 'Large XML file';
+        renderRHCertXMLInterface(filePath, content);
+        return;
+    }
+
+    // For other files, try to load content
     content.innerHTML = '<div style="text-align: center; padding: 40px; color: #999;">Loading...</div>';
 
     try {
@@ -263,9 +277,6 @@ async function viewFile(filePath) {
         const data = await response.json();
 
         if (data.success) {
-            // Get file extension
-            const ext = fileName.split('.').pop().toLowerCase();
-
             // Update file size
             document.getElementById('viewerFileSize').textContent = data.size_human || '';
 
@@ -276,6 +287,97 @@ async function viewFile(filePath) {
         }
     } catch (error) {
         content.innerHTML = `<div class="error-message">Failed to load file: ${error.message}</div>`;
+    }
+}
+
+// Render rhcert XML interface (without loading full content due to size)
+function renderRHCertXMLInterface(filePath, container) {
+    container.className = 'file-viewer-content';
+
+    // Create extract button and info area (no file content preview)
+    const html = `
+        <div style="background: #fff3cd; padding: 20px; border-radius: 8px; border-left: 4px solid #ff9800;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <div>
+                    <h3 style="margin: 0 0 8px 0; color: #e65100;">🎓 Red Hat Certification Test Results</h3>
+                    <p style="margin: 0; font-size: 0.95em; color: #666; line-height: 1.5;">
+                        This XML file contains embedded attachments including:<br>
+                        • Test logs (tempest.log, neutron logs, etc.)<br>
+                        • Configuration files (tempest.conf)<br>
+                        • Validation reports (JSON)<br>
+                        • <strong>sosreport archive</strong> (~109 MB with 23,000+ system files)
+                    </p>
+                </div>
+            </div>
+            <div style="text-align: center; padding: 20px; background: white; border-radius: 4px;">
+                <button class="btn btn-primary" onclick="extractRHCertAttachments('${escapeHtml(filePath)}')"
+                        id="extractRhcertBtn" style="padding: 12px 24px; font-size: 1.1em;">
+                    📦 Extract All Embedded Files
+                </button>
+                <div id="extractionStatus" style="margin-top: 15px; display: none;"></div>
+            </div>
+            <div style="margin-top: 15px; padding: 12px; background: #e3f2fd; border-radius: 4px; font-size: 0.9em; color: #1976d2;">
+                <strong>ℹ️ Note:</strong> File is too large (186 MB) to preview. Click the button above to extract embedded files,
+                then browse them in the File Browser tree structure.
+            </div>
+        </div>
+    `;
+
+    container.innerHTML = html;
+}
+
+// Legacy function kept for compatibility
+function renderRHCertXML(fileContent, filePath, container) {
+    renderRHCertXMLInterface(filePath, container);
+}
+
+// Extract rhcert attachments
+async function extractRHCertAttachments(filePath) {
+    const btn = document.getElementById('extractRhcertBtn');
+    const status = document.getElementById('extractionStatus');
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Extracting...';
+    status.style.display = 'block';
+    status.innerHTML = '<div style="color: #0066cc;">Extracting embedded files from XML...</div>';
+
+    try {
+        const response = await fetch(`/api/extract-rhcert/${currentJobId}/${filePath}`, {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            status.innerHTML = `
+                <div style="color: #4caf50;">
+                    ✅ <strong>Extraction Complete!</strong><br>
+                    • Total Attachments: ${data.total_attachments}<br>
+                    • Extracted Files: ${data.extracted_files}<br>
+                    • Extracted Archives: ${data.extracted_archives}<br>
+                    • Indexed Files: ${data.indexed_files}<br>
+                    <br>
+                    <strong>Files are now visible in the File Browser tree!</strong>
+                    Look for "rhcert_attachments" folder.
+                </div>
+            `;
+            btn.textContent = '✅ Extracted';
+
+            // Reload tree to show new files
+            if (typeof loadTree === 'function') {
+                setTimeout(() => {
+                    loadTree();
+                }, 1000);
+            }
+        } else {
+            status.innerHTML = `<div style="color: #f44336;">❌ Extraction failed: ${data.message || data.error}</div>`;
+            btn.disabled = false;
+            btn.textContent = '📦 Extract Embedded Files';
+        }
+    } catch (error) {
+        status.innerHTML = `<div style="color: #f44336;">❌ Error: ${error.message}</div>`;
+        btn.disabled = false;
+        btn.textContent = '📦 Extract Embedded Files';
     }
 }
 
@@ -582,6 +684,7 @@ document.getElementById('searchInput')?.addEventListener('keypress', (e) => {
 // ============================================
 
 let rhosoFolders = [];
+let rhcertFiles = [];
 let currentTestFolder = null;
 let currentTestResults = null;
 let chatHistory = [];
@@ -607,12 +710,16 @@ async function discoverRHOSOFolders() {
         const data = await response.json();
         rhosoFolders = data.rhoso_folders || [];
 
+        // Also discover rhcert files
+        await discoverRHCertFiles();
+
         displayRHOSOFolders();
 
-        // Show RHOSO card if folders found
-        if (rhosoFolders.length > 0) {
+        // Show RHOSO card if folders or rhcert files found
+        const totalTests = rhosoFolders.length + rhcertFiles.length;
+        if (totalTests > 0) {
             document.getElementById('rhosoCard').style.display = 'block';
-            document.getElementById('rhosoCount').textContent = rhosoFolders.length;
+            document.getElementById('rhosoCount').textContent = totalTests;
             document.getElementById('resultsTabBtn').style.display = 'block';
         }
 
@@ -623,30 +730,78 @@ async function discoverRHOSOFolders() {
     }
 }
 
-// Display RHOSO folder cards
+// Discover Red Hat Certification XML files
+async function discoverRHCertFiles() {
+    if (!currentJobId) return;
+
+    const extractPath = `${appConfig.extractFolder}/${currentJobId}`;
+
+    try {
+        const response = await fetch(`${appConfig.analysisServiceUrl}/api/analysis/discover-rhcert`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                job_id: currentJobId,
+                extract_path: extractPath
+            })
+        });
+
+        if (!response.ok) throw new Error('Failed to discover rhcert files');
+
+        const data = await response.json();
+        rhcertFiles = data.rhcert_files || [];
+
+        console.log(`Discovered ${rhcertFiles.length} rhcert files`);
+
+    } catch (error) {
+        console.error('Error discovering rhcert files:', error);
+        rhcertFiles = [];
+    }
+}
+
+// Display RHOSO folder cards and rhcert files
 function displayRHOSOFolders() {
     const container = document.getElementById('rhosoFoldersList');
 
-    if (rhosoFolders.length === 0) {
-        container.innerHTML = '<div class="loading">No RHOSO test folders found in this archive.</div>';
+    if (rhosoFolders.length === 0 && rhcertFiles.length === 0) {
+        container.innerHTML = '<div class="loading">No RHOSO test folders or rhcert files found in this archive.</div>';
         return;
     }
 
     let html = '';
-    rhosoFolders.forEach(folder => {
-        const icon = folder.has_xml ? '📊' : '📁';
-        const formatInfo = [];
-        if (folder.has_xml) formatInfo.push('XML Results');
-        if (folder.has_mustgather) formatInfo.push('Must-Gather');
 
-        html += `
-            <div class="rhoso-folder-card" onclick="loadTestResults('${folder.path}', '${folder.name}')">
-                <div class="rhoso-folder-icon">${icon}</div>
-                <div class="rhoso-folder-name">${folder.name}</div>
-                <div class="rhoso-folder-info">${formatInfo.join(' • ')}</div>
-            </div>
-        `;
-    });
+    // Display RHOSO folders
+    if (rhosoFolders.length > 0) {
+        html += '<h4 style="margin: 20px 0 10px 0;">RHOSO Tempest Test Results</h4>';
+        rhosoFolders.forEach(folder => {
+            const icon = folder.has_xml ? '📊' : '📁';
+            const formatInfo = [];
+            if (folder.has_xml) formatInfo.push('XML Results');
+            if (folder.has_mustgather) formatInfo.push('Must-Gather');
+
+            html += `
+                <div class="rhoso-folder-card" onclick="loadTestResults('${folder.path}', '${folder.name}', 'tempest')">
+                    <div class="rhoso-folder-icon">${icon}</div>
+                    <div class="rhoso-folder-name">${folder.name}</div>
+                    <div class="rhoso-folder-info">${formatInfo.join(' • ')}</div>
+                </div>
+            `;
+        });
+    }
+
+    // Display rhcert files
+    if (rhcertFiles.length > 0) {
+        html += '<h4 style="margin: 20px 0 10px 0;">Red Hat Certification Test Results</h4>';
+        rhcertFiles.forEach(file => {
+            html += `
+                <div class="rhoso-folder-card" onclick="loadRHCertResults('${file.path}', '${file.name}')">
+                    <div class="rhoso-folder-icon">🎓</div>
+                    <div class="rhoso-folder-name">${file.name}</div>
+                    <div class="rhoso-folder-info">${file.size_mb} MB • Certification XML</div>
+                </div>
+            `;
+        });
+    }
 
     container.innerHTML = html;
 }
@@ -689,6 +844,297 @@ async function loadTestResults(folderPath, folderName) {
         document.getElementById('testSummaryCards').innerHTML =
             `<div class="error-message">Error loading test results: ${error.message}</div>`;
     }
+}
+
+// Load and parse Red Hat Certification test results
+async function loadRHCertResults(filePath, fileName) {
+    currentTestFolder = filePath;
+
+    // Hide folders list, show results container
+    document.getElementById('rhosoFoldersList').style.display = 'none';
+    document.getElementById('testResultsContainer').style.display = 'block';
+    document.getElementById('currentTestFolder').textContent = fileName;
+
+    // Reset state
+    document.getElementById('aiAnalysisResult').style.display = 'none';
+    document.getElementById('aiChatSection').style.display = 'none';
+    chatHistory = [];
+
+    const extractPath = `${appConfig.extractFolder}/${currentJobId}`;
+
+    try {
+        // Parse attachments (neutron, cinder, manila) instead of direct XML parsing
+        const response = await fetch(`${appConfig.analysisServiceUrl}/api/analysis/parse-rhcert-attachments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                job_id: currentJobId,
+                extract_path: extractPath
+            })
+        });
+
+        if (!response.ok) throw new Error('Failed to parse rhcert attachment results');
+
+        currentTestResults = await response.json();
+        displayRHCertAttachmentResults(currentTestResults);
+
+    } catch (error) {
+        console.error('Error loading rhcert results:', error);
+        document.getElementById('testSummaryCards').innerHTML =
+            `<div class="error-message">Error loading certification results: ${error.message}</div>`;
+    }
+}
+
+// Display Red Hat Certification test results
+function displayRHCertResults(results) {
+    // Display summary cards with review count
+    const summaryHTML = `
+        <div class="test-summary-card">
+            <div class="test-card-number">${results.total_tests}</div>
+            <div class="test-card-label">Total Tests</div>
+        </div>
+        <div class="test-summary-card passed">
+            <div class="test-card-number">${results.passed}</div>
+            <div class="test-card-label">Passed</div>
+        </div>
+        <div class="test-summary-card failed">
+            <div class="test-card-number">${results.failed}</div>
+            <div class="test-card-label">Failed</div>
+        </div>
+        ${results.review > 0 ? `
+        <div class="test-summary-card" style="background: #fff3cd;">
+            <div class="test-card-number">${results.review}</div>
+            <div class="test-card-label">Review</div>
+        </div>
+        ` : ''}
+        <div class="test-summary-card skipped">
+            <div class="test-card-number">${results.skipped}</div>
+            <div class="test-card-label">Skipped</div>
+        </div>
+    `;
+    document.getElementById('testSummaryCards').innerHTML = summaryHTML;
+
+    // Display certification info if available
+    if (results.certification_info && results.product_info) {
+        const certInfo = results.certification_info;
+        const prodInfo = results.product_info;
+        const platInfo = results.platform_info || {};
+
+        const certInfoHTML = `
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0;">Certification Details</h4>
+                <p style="margin: 5px 0;"><strong>ID:</strong> ${certInfo.id}</p>
+                <p style="margin: 5px 0;"><strong>Name:</strong> ${certInfo.name}</p>
+                <p style="margin: 5px 0;"><strong>Type:</strong> ${certInfo.type}</p>
+                <p style="margin: 5px 0;"><strong>Status:</strong> ${certInfo.status}</p>
+                <p style="margin: 5px 0;"><strong>Product:</strong> ${prodInfo.vendor} - ${prodInfo.product}</p>
+                ${platInfo.product ? `<p style="margin: 5px 0;"><strong>Platform:</strong> ${platInfo.product} ${platInfo.version}</p>` : ''}
+            </div>
+        `;
+        document.getElementById('testSummaryCards').insertAdjacentHTML('beforebegin', certInfoHTML);
+    }
+
+    // Update failures section title
+    const failuresSection = document.querySelector('.failures-section h4');
+    if (failuresSection) {
+        failuresSection.textContent = 'Test Failures';
+    }
+
+    // Display failures
+    displayFailures(results.failures || []);
+
+    // Populate table view
+    populateTestTable(results);
+    document.getElementById('tableViewTabBtn').style.display = 'block';
+}
+
+// Display Red Hat Certification attachment-based test results (neutron, cinder, manila)
+function displayRHCertAttachmentResults(results) {
+    // Display summary cards
+    const summaryHTML = `
+        <div class="test-summary-card">
+            <div class="test-card-number">${results.total_tests}</div>
+            <div class="test-card-label">Total Tests</div>
+        </div>
+        <div class="test-summary-card passed">
+            <div class="test-card-number">${results.passed}</div>
+            <div class="test-card-label">Passed</div>
+        </div>
+        <div class="test-summary-card failed">
+            <div class="test-card-number">${results.failed}</div>
+            <div class="test-card-label">Failed</div>
+        </div>
+        <div class="test-summary-card skipped">
+            <div class="test-card-number">${results.skipped}</div>
+            <div class="test-card-label">Skipped</div>
+        </div>
+    `;
+    document.getElementById('testSummaryCards').innerHTML = summaryHTML;
+
+    // Display components summary
+    if (results.components_summary && Object.keys(results.components_summary).length > 0) {
+        let componentsHTML = `
+            <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0;">📦 Test Components (from Attachments)</h4>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px;">
+        `;
+
+        for (const [component, stats] of Object.entries(results.components_summary)) {
+            const passRate = stats.total > 0 ? Math.round((stats.passed / stats.total) * 100) : 0;
+            componentsHTML += `
+                <div style="background: white; padding: 10px; border-radius: 5px; border-left: 4px solid ${passRate >= 80 ? '#28a745' : passRate >= 50 ? '#ffc107' : '#dc3545'};">
+                    <strong>${component}</strong><br>
+                    <small>Total: ${stats.total} | Passed: ${stats.passed} | Failed: ${stats.failed} | Skipped: ${stats.skipped}</small><br>
+                    <small>Pass Rate: ${passRate}%</small>
+                </div>
+            `;
+        }
+
+        componentsHTML += `
+                </div>
+                <p style="margin: 10px 0 0 0; color: #666; font-size: 0.9em;">
+                    <em>These results are parsed from neutron/cinder/manila validation_report.json files extracted from rhcert XML attachments.</em>
+                </p>
+            </div>
+        `;
+
+        document.getElementById('testSummaryCards').insertAdjacentHTML('beforebegin', componentsHTML);
+    }
+
+    // Update failures section title
+    const failuresSection = document.querySelector('.failures-section h4');
+    if (failuresSection) {
+        failuresSection.textContent = 'Test Failures & Skipped Tests (Neutron, Cinder, Manila)';
+    }
+
+    // Display failures and skipped tests with pagination
+    displayFailuresAndSkipped(results.failures || [], results.skipped_tests || []);
+
+    // Populate table view
+    populateTestTable(results);
+    document.getElementById('tableViewTabBtn').style.display = 'block';
+}
+
+// Display failures and skipped tests with pagination (1000 items per page)
+function displayFailuresAndSkipped(failures, skippedTests) {
+    const container = document.getElementById('failuresList');
+
+    // Combine failures and skipped tests
+    allTestItems = [
+        ...failures.map(f => ({ ...f, itemType: 'failure' })),
+        ...skippedTests.map(s => ({ ...s, itemType: 'skipped' }))
+    ];
+
+    if (allTestItems.length === 0) {
+        container.innerHTML = '<div class="success-message">No test failures or skipped tests! All tests passed. 🎉</div>';
+        return;
+    }
+
+    // Reset to first page
+    currentPage = 1;
+    renderTestItemsPage();
+}
+
+function renderTestItemsPage() {
+    const container = document.getElementById('failuresList');
+    const totalPages = Math.ceil(allTestItems.length / itemsPerPage);
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    const endIndex = Math.min(startIndex + itemsPerPage, allTestItems.length);
+    const pageItems = allTestItems.slice(startIndex, endIndex);
+
+    let html = `
+        <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <strong>Total Items: ${allTestItems.length}</strong>
+                <span style="margin-left: 20px;">Showing ${startIndex + 1} - ${endIndex} of ${allTestItems.length}</span>
+                <span style="margin-left: 20px;">Page ${currentPage} of ${totalPages}</span>
+            </div>
+            <div>
+                <button onclick="changePage(-1)" ${currentPage === 1 ? 'disabled' : ''} style="margin-right: 5px; padding: 5px 15px;">← Previous</button>
+                <button onclick="changePage(1)" ${currentPage === totalPages ? 'disabled' : ''} style="padding: 5px 15px;">Next →</button>
+            </div>
+        </div>
+    `;
+
+    pageItems.forEach((item, index) => {
+        const globalIndex = startIndex + index;
+        const itemId = `test-item-${globalIndex}`;
+        const isFailure = item.itemType === 'failure';
+        const bgColor = isFailure ? '#fff5f5' : '#fffef0';
+        const borderColor = isFailure ? '#dc3545' : '#ffc107';
+        const icon = isFailure ? '❌' : '⏭️';
+
+        html += `
+            <div class="failure-box" id="${itemId}" style="background: ${bgColor}; border-left: 4px solid ${borderColor};">
+                <div class="failure-header" onclick="toggleFailure('${itemId}')">
+                    <div class="failure-title">
+                        ${icon} <strong>${item.component || 'unknown'}</strong>: ${item.test_name || 'Unknown Test'}
+                    </div>
+                    <div class="failure-toggle">►</div>
+                </div>
+                <div class="failure-content">
+                    <div class="failure-info">
+                        <div class="failure-label">Class:</div>
+                        <div>${item.class_name || 'Unknown'}</div>
+                    </div>
+                    <div class="failure-info">
+                        <div class="failure-label">Component:</div>
+                        <div>${item.component || 'Unknown'}</div>
+                    </div>
+                    <div class="failure-info">
+                        <div class="failure-label">Type:</div>
+                        <div><span style="color: ${isFailure ? '#dc3545' : '#ffc107'}; font-weight: bold;">${isFailure ? 'FAILED' : 'SKIPPED'}</span></div>
+                    </div>
+                    ${isFailure && item.error_message ? `
+                        <div class="failure-error">
+                            <div class="failure-label">Error Message:</div>
+                            ${escapeHtml(item.error_message)}
+                        </div>
+                    ` : ''}
+                    ${isFailure && item.traceback ? `
+                        <div class="failure-info">
+                            <div class="failure-label">Traceback:</div>
+                            <div class="failure-traceback">${escapeHtml(item.traceback)}</div>
+                        </div>
+                    ` : ''}
+                    ${!isFailure && item.skip_reason ? `
+                        <div class="failure-info">
+                            <div class="failure-label">Skip Reason:</div>
+                            <div style="color: #666;">${escapeHtml(item.skip_reason)}</div>
+                        </div>
+                    ` : ''}
+                    <div class="failure-actions">
+                        <button class="btn btn-sm" onclick="askAIAboutFailure(${globalIndex})">💬 Ask AI</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    // Add pagination controls at bottom too
+    html += `
+        <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-top: 15px; display: flex; justify-content: center; align-items: center;">
+            <button onclick="changePage(-1)" ${currentPage === 1 ? 'disabled' : ''} style="margin-right: 10px; padding: 8px 20px;">← Previous</button>
+            <span style="margin: 0 15px;"><strong>Page ${currentPage} of ${totalPages}</strong></span>
+            <button onclick="changePage(1)" ${currentPage === totalPages ? 'disabled' : ''} style="margin-left: 10px; padding: 8px 20px;">Next →</button>
+        </div>
+    `;
+
+    container.innerHTML = html;
+}
+
+function changePage(direction) {
+    const totalPages = Math.ceil(allTestItems.length / itemsPerPage);
+    currentPage += direction;
+
+    // Ensure page is within bounds
+    if (currentPage < 1) currentPage = 1;
+    if (currentPage > totalPages) currentPage = totalPages;
+
+    renderTestItemsPage();
+
+    // Scroll to top of failures section
+    document.querySelector('.failures-section').scrollIntoView({ behavior: 'smooth' });
 }
 
 // Display test summary and failures

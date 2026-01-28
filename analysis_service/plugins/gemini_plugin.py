@@ -1,6 +1,6 @@
 """
 Gemini AI Plugin
-Implements test failure analysis using Google's Gemini API (New google-genai package)
+Implements test failure analysis using Google's Gemini API (google-genai package)
 """
 
 from typing import AsyncIterator, Dict, List, Union
@@ -23,7 +23,8 @@ class GeminiPlugin(AIBackendPlugin):
         super().__init__()
         self.client = None
         self.api_key = None
-        self.model_name = "gemini-2.0-flash-exp"  # Latest fast model
+        # Use Gemini 2.5 Pro
+        self.model_name = "models/gemini-2.5-pro"
 
     @property
     def name(self) -> str:
@@ -31,7 +32,7 @@ class GeminiPlugin(AIBackendPlugin):
 
     @property
     def display_name(self) -> str:
-        return "Google Gemini 2.0 Flash"
+        return "Google Gemini 2.5 Pro"
 
     @property
     def supports_streaming(self) -> bool:
@@ -52,11 +53,11 @@ class GeminiPlugin(AIBackendPlugin):
             return
 
         try:
-            # Initialize the new Gemini client
+            # Initialize the Gemini client
             self.client = genai.Client(api_key=self.api_key)
 
             self.initialized = True
-            logger.info("Gemini plugin initialized successfully with new google-genai package")
+            logger.info("Gemini plugin initialized successfully")
 
         except Exception as e:
             logger.error(f"Failed to initialize Gemini plugin: {e}")

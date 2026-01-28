@@ -13,6 +13,8 @@ import os
 import json
 
 from analysis_service.parsers.tempest_xml import TempestXMLParser
+from analysis_service.parsers.rhcert_xml import RHCertXMLParser
+from analysis_service.parsers.rhcert_attachment_parser import RHCertAttachmentParser
 from analysis_service.parsers.mustgather import MustGatherParser
 from analysis_service.plugins.registry import registry
 from analysis_service.plugins.base import AnalysisContext
@@ -151,6 +153,50 @@ async def discover_rhoso_folders(request: DiscoverRequest):
     }
 
 
+@app.post("/api/analysis/discover-rhcert")
+async def discover_rhcert_files(request: DiscoverRequest):
+    """
+    Discover Red Hat Certification XML files in extracted archive
+
+    Args:
+        request: DiscoverRequest with job_id and extract_path
+
+    Returns:
+        List of discovered rhcert XML files
+    """
+    extract_path = request.extract_path
+
+    if not os.path.exists(extract_path):
+        raise HTTPException(status_code=404, detail="Extraction path not found")
+
+    rhcert_files = []
+
+    # Walk through extraction directory
+    for root, dirs, files in os.walk(extract_path):
+        for file_name in files:
+            if file_name.startswith('rhcert-results-') and file_name.endswith('.xml'):
+                file_path = os.path.join(root, file_name)
+                rel_path = os.path.relpath(file_path, extract_path)
+
+                # Get file size
+                file_size = os.path.getsize(file_path)
+
+                rhcert_files.append({
+                    'name': file_name,
+                    'path': rel_path,
+                    'size': file_size,
+                    'size_mb': round(file_size / (1024 * 1024), 2)
+                })
+
+    logger.info(f"Discovered {len(rhcert_files)} rhcert XML files for job {request.job_id}")
+
+    return {
+        'job_id': request.job_id,
+        'rhcert_files': rhcert_files,
+        'total_found': len(rhcert_files)
+    }
+
+
 @app.post("/api/analysis/parse")
 async def parse_tempest_results(request: ParseRequest):
     """
@@ -164,7 +210,11 @@ async def parse_tempest_results(request: ParseRequest):
     """
     test_folder_path = os.path.join(request.extract_path, request.test_folder)
 
-    if not os.path.exists(test_folder_path):
+    # Check if test_folder is actually a file (rhcert XML case)
+    # If it's a rhcert XML file, we don't need the test_folder_path, we'll use extract_path directly
+    is_rhcert_xml_file = request.test_folder.lower().endswith('.xml') and 'rhcert' in request.test_folder.lower()
+
+    if not is_rhcert_xml_file and not os.path.exists(test_folder_path):
         raise HTTPException(status_code=404, detail="Test folder not found")
 
     results = {
@@ -181,9 +231,14 @@ async def parse_tempest_results(request: ParseRequest):
         'source': None
     }
 
-    # Parse XML only
-    xml_path = os.path.join(test_folder_path, 'tempest_results.xml')
-    if os.path.exists(xml_path):
+    # Check for RHOSO format (tempest_results.xml) - only if not a rhcert XML file
+    if not is_rhcert_xml_file:
+        xml_path = os.path.join(test_folder_path, 'tempest_results.xml')
+    else:
+        xml_path = None
+
+    if xml_path and os.path.exists(xml_path):
+        # RHOSO format - parse tempest XML
         try:
             xml_parser = TempestXMLParser()
             xml_results = xml_parser.parse(xml_path)
@@ -198,12 +253,41 @@ async def parse_tempest_results(request: ParseRequest):
             results['failures'] = failures
             results['skipped_tests'] = skipped_tests
 
-            logger.info(f"Parsed XML: {results['total_tests']} tests, {results['failed']} failures, {results['skipped']} skipped")
+            logger.info(f"Parsed RHOSO XML: {results['total_tests']} tests, {results['failed']} failures, {results['skipped']} skipped")
         except Exception as e:
-            logger.error(f"Error parsing XML: {e}")
+            logger.error(f"Error parsing RHOSO XML: {e}")
             raise HTTPException(status_code=500, detail=f"Error parsing XML: {str(e)}")
+
     else:
-        raise HTTPException(status_code=404, detail="tempest_results.xml not found in test folder")
+        # Check for RHOSP format (rhcert attachments)
+        # Look for rhcert_attachments directory in the job's root directory
+        rhcert_attachments_path = os.path.join(request.extract_path, 'rhcert_attachments')
+
+        if os.path.exists(rhcert_attachments_path):
+            # RHOSP format - parse rhcert attachments
+            try:
+                logger.info(f"Parsing RHOSP rhcert attachments from {rhcert_attachments_path}")
+                # extract_path already includes job_id (e.g., extracted/job-id/)
+                # So we pass extract_path directly, and empty string for job_id since it's already in the path
+                parser = RHCertAttachmentParser(request.extract_path, '')
+                attachment_results = parser.parse()
+
+                # Convert to format expected by AI analysis
+                results['total_tests'] = attachment_results['total_tests']
+                results['passed'] = attachment_results['passed']
+                results['failed'] = attachment_results['failed']
+                results['skipped'] = attachment_results['skipped']
+                results['errors'] = attachment_results['errors']
+                results['failures'] = attachment_results['failures']
+                results['skipped_tests'] = attachment_results['skipped_tests']
+                results['source'] = 'rhcert-attachments'
+
+                logger.info(f"Parsed RHOSP attachments: {results['total_tests']} tests, {results['failed']} failures, {results['skipped']} skipped")
+            except Exception as e:
+                logger.error(f"Error parsing RHOSP attachments: {e}")
+                raise HTTPException(status_code=500, detail=f"Error parsing RHOSP attachments: {str(e)}")
+        else:
+            raise HTTPException(status_code=404, detail="No test results found. Looking for tempest_results.xml (RHOSO) or rhcert_attachments (RHOSP)")
 
     # Parse must-gather logs if available and failures exist
     if results['failed'] > 0 or results['errors'] > 0:
@@ -222,6 +306,105 @@ async def parse_tempest_results(request: ParseRequest):
                 logger.error(f"Error parsing must-gather: {e}")
 
     return results
+
+
+@app.post("/api/analysis/parse-rhcert")
+async def parse_rhcert_results(request: ParseRequest):
+    """
+    Parse Red Hat Certification test results from XML file
+
+    Args:
+        request: ParseRequest with job details (test_folder contains the XML file path)
+
+    Returns:
+        Parsed certification test results with failures and statistics
+    """
+    # test_folder contains the relative path to the XML file
+    xml_file_path = os.path.join(request.extract_path, request.test_folder)
+
+    if not os.path.exists(xml_file_path):
+        raise HTTPException(status_code=404, detail="rhcert XML file not found")
+
+    try:
+        rhcert_parser = RHCertXMLParser()
+        rhcert_results = rhcert_parser.parse(xml_file_path)
+
+        results = {
+            'job_id': request.job_id,
+            'test_folder': request.test_folder,
+            'total_tests': rhcert_results['total_tests'],
+            'passed': rhcert_results['passed'],
+            'failed': rhcert_results['failed'],
+            'skipped': rhcert_results['skipped'],
+            'errors': rhcert_results['errors'],
+            'review': rhcert_results.get('review', 0),
+            'duration': rhcert_results.get('duration', 0.0),
+            'failures': rhcert_results['failures'],
+            'skipped_tests': [],
+            'source': 'rhcert-xml',
+            'certification_info': rhcert_results.get('certification_info', {}),
+            'product_info': rhcert_results.get('product_info', {}),
+            'platform_info': rhcert_results.get('platform_info', {}),
+            'test_components': rhcert_results.get('test_components', [])
+        }
+
+        logger.info(f"Parsed rhcert XML: {results['total_tests']} tests, "
+                   f"{results['failed']} failures, {results['review']} review")
+
+        return results
+
+    except Exception as e:
+        logger.error(f"Error parsing rhcert XML: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error parsing rhcert XML: {str(e)}")
+
+
+@app.post("/api/analysis/parse-rhcert-attachments")
+async def parse_rhcert_attachments(request: DiscoverRequest):
+    """
+    Parse test results from rhcert XML attachments (neutron, cinder, manila)
+
+    This endpoint looks for extracted attachments from rhcert XML and parses
+    validation_report.json files for neutron/cinder/manila components.
+
+    Args:
+        request: DiscoverRequest with job_id and extract_path
+
+    Returns:
+        Aggregated test results from all neutron/cinder/manila components
+    """
+    try:
+        parser = RHCertAttachmentParser(request.extract_path, request.job_id)
+        attachment_results = parser.parse()
+
+        results = {
+            'job_id': request.job_id,
+            'type': 'rhcert_attachments',
+            'components': attachment_results['components'],
+            'components_summary': attachment_results['components_summary'],
+            'total_tests': attachment_results['total_tests'],
+            'passed': attachment_results['passed'],
+            'failed': attachment_results['failed'],
+            'skipped': attachment_results['skipped'],
+            'errors': attachment_results['errors'],
+            'review': 0,
+            'duration': 0.0,
+            'failures': attachment_results['failures'],
+            'skipped_tests': attachment_results['skipped_tests'],
+            'source': 'rhcert-attachments'
+        }
+
+        logger.info(f"Parsed rhcert attachments: {len(attachment_results['components'])} components, "
+                   f"{results['total_tests']} tests, {results['failed']} failures, {results['skipped']} skipped")
+
+        return results
+
+    except Exception as e:
+        logger.error(f"Error parsing rhcert attachments: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error parsing rhcert attachments: {str(e)}")
 
 
 @app.get("/api/analysis/backends")
